@@ -1,4 +1,5 @@
 // src/components/SalesForm.js
+
 import React, { useState, useEffect } from "react";
 import { getProducts, createSale } from "../lib/firestore";
 
@@ -9,304 +10,368 @@ export default function SalesForm() {
   const [bigBoxes, setBigBoxes] = useState(0);
   const [smallPacks, setSmallPacks] = useState(0);
   const [looseUnits, setLooseUnits] = useState(0);
+  const [discBigPrice, setDiscBigPrice] = useState("");
+  const [discSmallPrice, setDiscSmallPrice] = useState("");
+  const [discUnitPrice, setDiscUnitPrice] = useState("");
   const [cart, setCart] = useState([]);
   const [paymentType, setPaymentType] = useState("Cash");
-  const [loadingProducts, setLoadingProducts] = useState(true);
-  const [processing, setProcessing] = useState(false);
+  const [loading, setLoading] = useState(true);
 
-  // Load products once when page loads
   useEffect(() => {
-    async function loadProducts() {
+    async function load() {
       try {
         const prods = await getProducts();
         setProducts(prods);
       } catch (err) {
-        console.error("Error loading products:", err);
-        alert("Failed to load products: " + (err.message || err));
+        console.error("Failed load products", err);
       } finally {
-        setLoadingProducts(false);
+        setLoading(false);
       }
     }
-    loadProducts();
+    load();
   }, []);
 
-  function computeItemTotal(item) {
-    return (
-      (Number(item.bigBoxes || 0) * Number(item.bigBulkPrice || 0)) +
-      (Number(item.smallPacks || 0) * Number(item.smallBulkPrice || 0)) +
-      (Number(item.looseUnits || 0) * Number(item.loosePrice || 0))
-    );
+  const selectedProduct = products.find(p => p.id === selectedProductId) || null;
+
+  function computeItemSubtotal(product, bigBoxesVal, smallPacksVal, looseUnitsVal, dBig, dSmall, dUnit) {
+    const bigPrice = (dBig !== "" && dBig != null) ? Number(dBig) : Number(product.bigBulkPrice || 0);
+    const smallPrice = (dSmall !== "" && dSmall != null) ? Number(dSmall) : Number(product.smallBulkPrice || 0);
+    const unitPrice = (dUnit !== "" && dUnit != null) ? Number(dUnit) : Number(product.price || 0);
+
+    return (Number(bigBoxesVal || 0) * bigPrice)
+      + (Number(smallPacksVal || 0) * smallPrice)
+      + (Number(looseUnitsVal || 0) * unitPrice);
   }
 
-  function addToCart() {
-    if (!selectedProductId) return alert("Choose a product first");
+  function computeItemUnits(product, bigBoxesVal, smallPacksVal, looseUnitsVal) {
+    const bigPerBox = Number(product.bigBulkQty || 0);
+    const smallPerPack = Number(product.smallBulkQty || 0);
+    return Number(bigBoxesVal || 0) * bigPerBox
+      + Number(smallPacksVal || 0) * smallPerPack
+      + Number(looseUnitsVal || 0);
+  }
 
-    const product = products.find((p) => p.id === selectedProductId);
-    if (!product) return alert("Product not found");
-
-    const newItem = {
-      productId: product.id,
-      productName: product.name || product.productName || "Product",
-      bigBoxes: Number(bigBoxes || 0),
-      bigBulkQty: Number(product.bigBulkQty || 0),
-      bigBulkPrice: Number(product.bigBulkPrice || product.bigBoxPrice || 0),
-      smallPacks: Number(smallPacks || 0),
-      smallBulkQty: Number(product.smallBulkQty || 0),
-      smallBulkPrice: Number(product.smallBulkPrice || 0),
-      looseUnits: Number(looseUnits || 0),
-      loosePrice: Number(product.price ?? product.unitPrice ?? 0),
-    };
-
-    // require at least one non-zero qty
-    const totalUnits =
-      newItem.bigBoxes * newItem.bigBulkQty +
-      newItem.smallPacks * newItem.smallBulkQty +
-      newItem.looseUnits;
-    if (totalUnits <= 0) return alert("Enter a quantity for this product (big / small / loose).");
-
-    // merge if same product exists (just sum the parts)
-    const existing = cart.find((c) => c.productId === newItem.productId);
-    if (existing) {
-      setCart((prev) =>
-        prev.map((c) =>
-          c.productId === newItem.productId
-            ? {
-                ...c,
-                bigBoxes: c.bigBoxes + newItem.bigBoxes,
-                smallPacks: c.smallPacks + newItem.smallPacks,
-                looseUnits: c.looseUnits + newItem.looseUnits,
-              }
-            : c
-        )
-      );
-    } else {
-      setCart((prev) => [...prev, newItem]);
-    }
-
-    // reset builder
+  function resetBuilder() {
     setSelectedProductId("");
     setBigBoxes(0);
     setSmallPacks(0);
     setLooseUnits(0);
+    setDiscBigPrice("");
+    setDiscSmallPrice("");
+    setDiscUnitPrice("");
+  }
+
+  function addToCart() {
+    if (!selectedProduct) return alert("Choose a product first");
+
+    const totalUnits = computeItemUnits(selectedProduct, bigBoxes, smallPacks, looseUnits);
+    if (totalUnits <= 0) return alert("Enter some quantity (boxes/packs/units)");
+
+    const subtotal = computeItemSubtotal(
+      selectedProduct,
+      bigBoxes,
+      smallPacks,
+      looseUnits,
+      discBigPrice,
+      discSmallPrice,
+      discUnitPrice
+    );
+
+    const newItem = {
+      productId: selectedProduct.id,
+      productName: selectedProduct.name,
+      bigBoxes: Number(bigBoxes || 0),
+      bigBoxQty: Number(selectedProduct.bigBulkQty || 0),
+      bigBoxPrice: Number(selectedProduct.bigBulkPrice || 0),
+      smallPacks: Number(smallPacks || 0),
+      smallPackQty: Number(selectedProduct.smallBulkQty || 0),
+      smallPackPrice: Number(selectedProduct.smallBulkPrice || 0),
+      looseUnits: Number(looseUnits || 0),
+      loosePrice: Number(selectedProduct.price || 0),
+      discountedBigPrice: discBigPrice === "" ? null : Number(discBigPrice),
+      discountedSmallPrice: discSmallPrice === "" ? null : Number(discSmallPrice),
+      discountedUnitPrice: discUnitPrice === "" ? null : Number(discUnitPrice),
+      totalUnits,
+      subtotal: Number(subtotal || 0),
+    };
+
+    // merge if same product exists
+    const existing = cart.find(c => c.productId === newItem.productId);
+    if (existing) {
+      const merged = cart.map(c => {
+        if (c.productId === newItem.productId) {
+          const big = c.bigBoxes + newItem.bigBoxes;
+          const small = c.smallPacks + newItem.smallPacks;
+          const loose = c.looseUnits + newItem.looseUnits;
+          const subtotalMerged = computeItemSubtotal(
+            selectedProduct,
+            big,
+            small,
+            loose,
+            newItem.discountedBigPrice ?? c.discountedBigPrice,
+            newItem.discountedSmallPrice ?? c.discountedSmallPrice,
+            newItem.discountedUnitPrice ?? c.discountedUnitPrice
+          );
+          return {
+            ...c,
+            bigBoxes: big,
+            smallPacks: small,
+            looseUnits: loose,
+            totalUnits: computeItemUnits(selectedProduct, big, small, loose),
+            subtotal: subtotalMerged,
+          };
+        }
+        return c;
+      });
+      setCart(merged);
+    } else {
+      setCart(prev => [...prev, newItem]);
+    }
+
+    resetBuilder();
   }
 
   function removeFromCart(productId) {
-    setCart((prev) => prev.filter((i) => i.productId !== productId));
+    setCart(prev => prev.filter(i => i.productId !== productId));
   }
 
-  const totalAmount = cart.reduce((s, item) => s + computeItemTotal(item), 0);
+  const totalAmount = cart.reduce((s, i) => s + Number(i.subtotal || 0), 0);
 
   async function handleSale() {
+    if (paymentType === "Hutang" && (!customerName || !customerName.trim())) {
+      return alert("Please enter a customer name for Hutang (credit) sales.");
+    }
+
+    const customer = (customerName && customerName.trim()) ? customerName.trim() : "Walk-in";
     if (cart.length === 0) return alert("Cart is empty");
 
-    setProcessing(true);
+    const saleData = {
+      customer,
+      paymentType,
+      items: cart.map(i => ({
+        productId: i.productId,
+        productName: i.productName,
+        bigBoxes: i.bigBoxes,
+        bigBoxQty: i.bigBoxQty,
+        bigBoxPrice: i.discountedBigPrice ?? i.bigBoxPrice,
+        smallPacks: i.smallPacks,
+        smallPackQty: i.smallPackQty,
+        smallPackPrice: i.discountedSmallPrice ?? i.smallPackPrice,
+        looseUnits: i.looseUnits,
+        unitPrice: i.discountedUnitPrice ?? i.loosePrice,
+        totalUnits: i.totalUnits,
+        subtotal: i.subtotal,
+        discountedBigPrice: i.discountedBigPrice,
+        discountedSmallPrice: i.discountedSmallPrice,
+        discountedUnitPrice: i.discountedUnitPrice,
+      })),
+      total: Number(totalAmount || 0),
+    };
+
+    setLoading(true);
     try {
-      // normalize items into the shape createSale expects:
-      // { productId, productName, quantity, price, subtotal, ... }
-      const normalizedItems = cart.map((item) => {
-        const totalUnits =
-          Number(item.bigBoxes || 0) * Number(item.bigBulkQty || 0) +
-          Number(item.smallPacks || 0) * Number(item.smallBulkQty || 0) +
-          Number(item.looseUnits || 0);
-
-        const subtotal =
-          Number(item.bigBoxes || 0) * Number(item.bigBulkPrice || 0) +
-          Number(item.smallPacks || 0) * Number(item.smallBulkPrice || 0) +
-          Number(item.looseUnits || 0) * Number(item.loosePrice || 0);
-
-        const unitPrice = totalUnits ? subtotal / totalUnits : Number(item.loosePrice || 0);
-
-        return {
-          productId: item.productId,
-          productName: item.productName,
-          quantity: Number(totalUnits),
-          price: Number(unitPrice),
-          subtotal: Number(subtotal),
-          // keep original breakdown for history if needed
-          bigBoxes: Number(item.bigBoxes || 0),
-          bigBulkQty: Number(item.bigBulkQty || 0),
-          bigBulkPrice: Number(item.bigBulkPrice || 0),
-          smallPacks: Number(item.smallPacks || 0),
-          smallBulkQty: Number(item.smallBulkQty || 0),
-          smallBulkPrice: Number(item.smallBulkPrice || 0),
-          looseUnits: Number(item.looseUnits || 0),
-          loosePrice: Number(item.loosePrice || 0),
-        };
-      });
-
-      // double check no zero-quantity item slipped through
-      for (const ni of normalizedItems) {
-        if (!ni.quantity || ni.quantity <= 0) {
-          throw new Error("One item has zero quantity — remove or correct it before completing sale.");
-        }
-      }
-
-      const customerForSale = customerName && customerName.trim() !== "" ? customerName.trim() : "Walk-in";
-
-      const saleId = await createSale({
-        customer: customerForSale,
-        items: normalizedItems,
-        paymentType, // values: "Cash" or "Online Transfer"
-        total: Number(totalAmount || 0),
-      });
-
+      const saleId = await createSale(saleData);
       alert("Sale recorded. ID: " + saleId);
-
-      // reset UI
       setCustomerName("");
       setCart([]);
       setPaymentType("Cash");
     } catch (err) {
-      console.error("Sale failed:", err);
+      console.error("Sale error", err);
       alert("Sale failed: " + (err.message || err));
     } finally {
-      setProcessing(false);
+      setLoading(false);
     }
   }
 
   return (
-    <div className="p-4 border rounded bg-gray-50">
-      <h2 className="text-xl font-bold mb-3">New Sale</h2>
+    <div style={{ maxWidth: 760 }}>
+      <h3>Sales / New Transaction</h3>
 
-      {/* Customer Name */}
-      <div className="mb-3">
-        <label className="block text-sm font-medium">Customer (optional)</label>
-        <input
-          type="text"
-          value={customerName}
-          onChange={(e) => setCustomerName(e.target.value)}
-          className="w-full border p-2 rounded"
-          placeholder="Leave blank => Walk-in"
-        />
-      </div>
+      <div style={{ border: "1px solid #ddd", padding: 12, marginBottom: 12 }}>
+        <div style={{ marginBottom: 8 }}>
+          <label>Customer: </label>
+          <input
+            value={customerName}
+            onChange={e => setCustomerName(e.target.value)}
+            placeholder="Customer name (required for Hutang)"
+            style={{ width: 300 }}
+          />
+        </div>
 
-      {/* Product selection (name only) */}
-      <div className="mb-3">
-        <label className="block text-sm font-medium">Select Product</label>
-        {loadingProducts ? (
-          <div>Loading products…</div>
-        ) : (
-          <select
-            value={selectedProductId}
-            onChange={(e) => setSelectedProductId(e.target.value)}
-            className="w-full border p-2 rounded"
-          >
-            <option value="">-- Select a product --</option>
-            {products.map((p) => (
+        <div style={{ marginBottom: 8 }}>
+          <label>Product: </label>
+          <select value={selectedProductId} onChange={e => setSelectedProductId(e.target.value)}>
+            <option value="">— choose product —</option>
+            {products.map(p => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
             ))}
           </select>
+        </div>
+
+        <div style={{ display: "flex", gap: 12, marginBottom: 8 }}>
+          <div>
+            <label>Big boxes</label><br />
+            <input
+              type="number"
+              value={bigBoxes}
+              min="0"
+              onChange={e => setBigBoxes(Number(e.target.value || 0))}
+              style={{ width: 100 }}
+            />
+            <div style={{ fontSize: 12, color: "#666" }}>
+              {selectedProduct ? `${selectedProduct.bigBulkQty || "-"} units/box` : "-"}
+            </div>
+            <div style={{ fontSize: 12, color: "#666" }}>
+              Box price: {selectedProduct ? (selectedProduct.bigBulkPrice ?? "-") : "-"}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              Disc:{" "}
+              <input
+                type="number"
+                value={discBigPrice}
+                onChange={e => setDiscBigPrice(e.target.value)}
+                style={{ width: 80 }}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label>Small packs</label><br />
+            <input
+              type="number"
+              value={smallPacks}
+              min="0"
+              onChange={e => setSmallPacks(Number(e.target.value || 0))}
+              style={{ width: 100 }}
+            />
+            <div style={{ fontSize: 12, color: "#666" }}>
+              {selectedProduct ? `${selectedProduct.smallBulkQty || "-"} units/pack` : "-"}
+            </div>
+            <div style={{ fontSize: 12, color: "#666" }}>
+              Pack price: {selectedProduct ? (selectedProduct.smallBulkPrice ?? "-") : "-"}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              Disc:{" "}
+              <input
+                type="number"
+                value={discSmallPrice}
+                onChange={e => setDiscSmallPrice(e.target.value)}
+                style={{ width: 80 }}
+              />
+            </div>
+          </div>
+
+          <div>
+            <label>Loose units</label><br />
+            <input
+              type="number"
+              value={looseUnits}
+              min="0"
+              onChange={e => setLooseUnits(Number(e.target.value || 0))}
+              style={{ width: 100 }}
+            />
+            <div style={{ fontSize: 12, color: "#666" }}>
+              Unit price: {selectedProduct ? (selectedProduct.price ?? "-") : "-"}
+            </div>
+            <div style={{ fontSize: 12 }}>
+              Disc:{" "}
+              <input
+                type="number"
+                value={discUnitPrice}
+                onChange={e => setDiscUnitPrice(e.target.value)}
+                style={{ width: 80 }}
+              />
+            </div>
+          </div>
+
+          <div style={{ marginLeft: "auto" }}>
+            <div>
+              Preview units:{" "}
+              <strong>{computeItemUnits(selectedProduct || {}, bigBoxes, smallPacks, looseUnits)}</strong>
+            </div>
+            <div>
+              Preview subtotal:{" "}
+              <strong>
+                RM{" "}
+                {computeItemSubtotal(
+                  selectedProduct || {},
+                  bigBoxes,
+                  smallPacks,
+                  looseUnits,
+                  discBigPrice,
+                  discSmallPrice,
+                  discUnitPrice
+                ).toFixed(2)}
+              </strong>
+            </div>
+            <div style={{ marginTop: 8 }}>
+              <button onClick={addToCart}>Add In Cart</button> {/* ✅ changed */}
+              <button onClick={resetBuilder} style={{ marginLeft: 8 }}>
+                Clear
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginBottom: 12 }}>
+        <h4>🛒 In Cart</h4> {/* ✅ changed */}
+        {cart.length === 0 ? (
+          <p>No items added</p>
+        ) : (
+          <table style={{ borderCollapse: "collapse", width: "100%" }}>
+            <thead>
+              <tr>
+                <th style={{ border: "1px solid #ddd", padding: 6 }}>Product</th>
+                <th style={{ border: "1px solid #ddd", padding: 6 }}>Qty (big/small/loose)</th>
+                <th style={{ border: "1px solid #ddd", padding: 6 }}>Subtotal (RM)</th>
+                <th style={{ border: "1px solid #ddd", padding: 6 }}>Remove</th>
+              </tr>
+            </thead>
+            <tbody>
+              {cart.map((li, i) => (
+                <tr key={i}>
+                  <td style={{ border: "1px solid #eee", padding: 6 }}>{li.productName}</td>
+                  <td style={{ border: "1px solid #eee", padding: 6 }}>
+                    {li.bigBoxes ? `${li.bigBoxes} big` : null}{" "}
+                    {li.smallPacks ? `${li.smallPacks} pack` : null}{" "}
+                    {li.looseUnits ? `${li.looseUnits} unit` : null}
+                  </td>
+                  <td style={{ border: "1px solid #eee", padding: 6 }}>
+                    RM {Number(li.subtotal || 0).toFixed(2)}
+                  </td>
+                  <td style={{ border: "1px solid #eee", padding: 6 }}>
+                    <button onClick={() => removeFromCart(li.productId)}>Remove</button>
+                  </td>
+                </tr>
+              ))}
+              <tr>
+                <td colSpan={2} style={{ textAlign: "right", padding: 6 }}>
+                  Total:
+                </td>
+                <td style={{ padding: 6 }}>RM {Number(totalAmount || 0).toFixed(2)}</td>
+                <td />
+              </tr>
+            </tbody>
+          </table>
         )}
       </div>
 
-      {/* Quantity Inputs */}
-      <div className="grid grid-cols-3 gap-2 mb-3">
-        <div>
-          <label className="block text-xs">Big Bulk (boxes)</label>
-          <input
-            type="number"
-            min="0"
-            value={bigBoxes}
-            onChange={(e) => setBigBoxes(Number(e.target.value || 0))}
-            className="w-full border p-2 rounded text-center"
-          />
-        </div>
-        <div>
-          <label className="block text-xs">Small Bulk (packs)</label>
-          <input
-            type="number"
-            min="0"
-            value={smallPacks}
-            onChange={(e) => setSmallPacks(Number(e.target.value || 0))}
-            className="w-full border p-2 rounded text-center"
-          />
-        </div>
-        <div>
-          <label className="block text-xs">Loose Units</label>
-          <input
-            type="number"
-            min="0"
-            value={looseUnits}
-            onChange={(e) => setLooseUnits(Number(e.target.value || 0))}
-            className="w-full border p-2 rounded text-center"
-          />
-        </div>
-      </div>
-
-      {/* Add button */}
-      <div className="mb-3">
-        <button
-          onClick={addToCart}
-          className="bg-blue-500 text-white px-3 py-2 rounded"
-        >
-          Add to Cart
-        </button>
-      </div>
-
-      {/* Cart */}
-      <h3 className="font-semibold mb-2">Cart</h3>
-      {cart.length === 0 ? (
-        <p>No items in cart.</p>
-      ) : (
-        <ul className="space-y-2 mb-3">
-          {cart.map((item) => (
-            <li key={item.productId} className="border p-2 rounded">
-              <div className="flex justify-between items-start">
-                <div>
-                  <div className="font-medium">{item.productName}</div>
-                  <div style={{ fontSize: 13, color: "#444" }}>
-                    {/* show only non-zero breakdown pieces */}
-                    {item.bigBoxes > 0 && (
-                      <span>{item.bigBoxes} × box ({item.bigBulkQty}u) = RM{(item.bigBoxes * item.bigBulkPrice).toFixed(2)}</span>
-                    )}
-                    {item.bigBoxes > 0 && (item.smallPacks > 0 || item.looseUnits > 0) && <span> · </span>}
-                    {item.smallPacks > 0 && (
-                      <span>{item.smallPacks} × pack ({item.smallBulkQty}u) = RM{(item.smallPacks * item.smallBulkPrice).toFixed(2)}</span>
-                    )}
-                    {item.smallPacks > 0 && item.looseUnits > 0 && <span> · </span>}
-                    {item.looseUnits > 0 && (
-                      <span>{item.looseUnits} × unit = RM{(item.looseUnits * item.loosePrice).toFixed(2)}</span>
-                    )}
-                    <div style={{ marginTop: 6, fontWeight: 600 }}>Subtotal: RM {computeItemTotal(item).toFixed(2)}</div>
-                  </div>
-                </div>
-
-                <div>
-                  <button onClick={() => removeFromCart(item.productId)} className="bg-red-500 text-white px-2 py-1 rounded">Remove</button>
-                </div>
-              </div>
-            </li>
-          ))}
-        </ul>
-      )}
-
-      {/* Total */}
-      <div className="mb-3 font-bold text-lg">Total: RM {totalAmount.toFixed(2)}</div>
-
-      {/* Payment type (only two options) */}
-      <div className="mb-3">
-        <label className="block text-sm font-medium">Payment Type</label>
-        <select
-          value={paymentType}
-          onChange={(e) => setPaymentType(e.target.value)}
-          className="w-full border p-2 rounded"
-        >
+      <div style={{ marginTop: 12 }}>
+        <label>Payment type: </label>
+        <select value={paymentType} onChange={e => setPaymentType(e.target.value)}>
           <option value="Cash">Cash</option>
           <option value="Online Transfer">Online Transfer</option>
+          <option value="Hutang">Hutang (credit)</option>
         </select>
-      </div>
 
-      {/* Submit */}
-      <div>
-        <button
-          onClick={handleSale}
-          disabled={cart.length === 0 || processing}
-          className="bg-green-600 text-white px-4 py-2 rounded w-full"
-        >
-          {processing ? "Processing..." : "Complete Sale"}
-        </button>
+        <div style={{ marginTop: 10 }}>
+          <button onClick={handleSale} disabled={loading || cart.length === 0}>
+            {loading ? "Saving..." : "Complete Sale"}
+          </button>
+        </div>
       </div>
     </div>
   );

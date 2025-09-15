@@ -5,9 +5,12 @@ import ProductsList from "./components/ProductsList";
 import SalesForm from "./components/SalesForm";
 import SalesHistory from "./components/SalesHistory";
 import Dashboard from "./components/Dashboard";
+import HutangPage from "./components/HutangPage";   // ✅ new
+import DashboardCards from "./components/DashboardCards"; // ✅ new
 
 export default function App() {
-  const [view, setView] = useState("dashboard"); // dashboard | products | newproduct | sales | history
+  const [view, setView] = useState("dashboard"); 
+  // views: dashboard | products | newproduct | sales | history | hutang
 
   return (
     <div style={{ fontFamily: "Arial, sans-serif", padding: 16 }}>
@@ -19,15 +22,23 @@ export default function App() {
           <button onClick={() => setView("newproduct")} style={{ marginRight: 6 }}>Add Product</button>
           <button onClick={() => setView("sales")} style={{ marginRight: 6 }}>New Sale</button>
           <button onClick={() => setView("history")} style={{ marginRight: 6 }}>Sales History</button>
+          <button onClick={() => setView("hutang")} style={{ marginRight: 6 }}>Hutang</button> {/* ✅ new button */}
         </nav>
       </header>
 
       <main>
-        {view === "dashboard" && <Dashboard />}
+        {view === "dashboard" && (
+          <div>
+            <Dashboard />
+            <hr />
+            <DashboardCards />  {/* ✅ new summary cards */}
+          </div>
+        )}
         {view === "products" && <ProductsList />}
         {view === "newproduct" && <ProductForm />}
         {view === "sales" && <SalesForm />}
         {view === "history" && <SalesHistory />}
+        {view === "hutang" && <HutangPage />} {/* ✅ new page */}
       </main>
     </div>
   );

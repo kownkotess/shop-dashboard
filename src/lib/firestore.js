@@ -11,13 +11,17 @@ import {
   deleteDoc,
   serverTimestamp,
   runTransaction,
-  getDocs
+  getDocs,
+  where
 } from "firebase/firestore";
 
 const productsCol = collection(db, "products");
 const salesCol = collection(db, "sales");
+const paymentsCol = collection(db, "payments"); // top-level payments for easy reporting
 
-// Create product
+// --------------------
+// Add product (keep numeric fields safe)
+// --------------------
 export async function addProduct(data) {
   return await addDoc(productsCol, {
     ...data,
@@ -25,17 +29,19 @@ export async function addProduct(data) {
     startingStock: Number(data.startingStock || 0),
     totalPurchased: Number(data.totalPurchased || 0),
     quantitySold: Number(data.quantitySold || 0),
-    balance: Number(data.balance ?? (data.startingStock || 0)),
+    balance: Number(data.balance || data.startingStock || 0),
     unitPrice: Number(data.unitPrice || 0),
     smallBulkQty: Number(data.smallBulkQty || 0),
     smallBulkPrice: Number(data.smallBulkPrice || 0),
     bigBulkQty: Number(data.bigBulkQty || 0),
     bigBulkPrice: Number(data.bigBulkPrice || 0),
-    reorderPoint: Number(data.reorderPoint || 0)
+    reorderPoint: Number(data.reorderPoint || 0),
   });
 }
 
-// One-time fetch of products (used by SalesForm)
+// --------------------
+// One-time fetch of products (used by Sales UI)
+// --------------------
 export async function getProducts() {
   const q = query(productsCol, orderBy("createdAt", "desc"));
   const snap = await getDocs(q);
@@ -44,148 +50,179 @@ export async function getProducts() {
     return {
       id: d.id,
       name: data.name || data.productName || "",
-      price: Number(data.unitPrice ?? data.price ?? 0),
-      startingStock: Number(data.startingStock ?? 0),
-      smallBulkQty: Number(data.smallBulkQty ?? 0),
-      smallBulkPrice: Number(data.smallBulkPrice ?? 0),
-      bigBulkQty: Number(data.bigBulkQty ?? 0),
-      bigBulkPrice: Number(data.bigBulkPrice ?? 0),
-      balance: Number(data.balance ?? 0),
+      price: Number(data.unitPrice || data.price || 0),
+      startingStock: Number(data.startingStock || 0),
+      smallBulkQty: Number(data.smallBulkQty || 0),
+      smallBulkPrice: Number(data.smallBulkPrice || 0),
+      bigBulkQty: Number(data.bigBulkQty || 0),
+      bigBulkPrice: Number(data.bigBulkPrice || 0),
+      balance: Number(data.balance || 0),
       ...data
     };
   });
 }
 
-// Real-time listener for all products
+// --------------------
+// Real-time products listener
+// --------------------
 export function subscribeProducts(callback) {
   const q = query(productsCol, orderBy("createdAt", "desc"));
-  return onSnapshot(q, (snapshot) => {
-    const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return onSnapshot(q, snapshot => {
+    const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
     callback(items);
   });
 }
 
-// Update product
-export async function updateProduct(productId, updates) {
-  const ref = doc(db, "products", productId);
-  await updateDoc(ref, updates);
-}
-
-// Delete product
-export async function deleteProduct(productId) {
-  await deleteDoc(doc(db, "products", productId));
-}
-
-// Adjust stock helper (example)
-export async function adjustProductStock(
-  productId,
-  deltaPurchased = 0,
-  deltaSold = 0
-) {
-  const productRef = doc(db, "products", productId);
-  await runTransaction(db, async (t) => {
-    const snap = await t.get(productRef);
-    if (!snap.exists()) throw new Error("Product not found");
-    const prod = snap.data();
-    const newTotalPurchased = (prod.totalPurchased || 0) + deltaPurchased;
-    const newQuantitySold = (prod.quantitySold || 0) + deltaSold;
-    const newBalance =
-      (prod.startingStock || 0) + newTotalPurchased - newQuantitySold;
-    t.update(productRef, {
-      totalPurchased: newTotalPurchased,
-      quantitySold: newQuantitySold,
-      balance: newBalance,
-    });
-  });
-}
-
-// Sales helpers: realtime & line items fetch
+// --------------------
+// Sales real-time listener
+// --------------------
 export function subscribeSales(callback) {
   const q = query(salesCol, orderBy("createdAt", "desc"));
-  return onSnapshot(q, (snapshot) => {
-    const items = snapshot.docs.map((d) => ({ id: d.id, ...d.data() }));
+  return onSnapshot(q, snapshot => {
+    const items = snapshot.docs.map(d => ({ id: d.id, ...d.data() }));
     callback(items);
   });
 }
 
+// --------------------
+// Subscribe Hutang (client-side filter for remaining > 0)
+// --------------------
+export function subscribeHutang(callback) {
+  // get all sales then filter client-side (avoids extra index requirements).
+  const unsub = subscribeSales(all => {
+    const hutang = all.filter(s => Number(s.remaining || s.total || 0) > 0);
+    callback(hutang);
+  });
+  return unsub;
+}
+
+// --------------------
+// Get sale line items
+// --------------------
 export async function getSaleLineItems(saleId) {
   const liCol = collection(db, "sales", saleId, "lineItems");
   const snap = await getDocs(liCol);
   return snap.docs.map(d => ({ id: d.id, ...d.data() }));
 }
 
-// Create Sale (transaction-safe, reads first then writes)
-// sale.items expected as array with at least:
-// either { quantity, price } OR the normalized items we build in SalesForm:
-// { productId, productName, quantity, price, subtotal, bigBoxes, smallPacks, looseUnits }
+// --------------------
+// Helper: compute total units for a line item (supports many formats)
+// --------------------
+function computeUnitsFromLineItem(li, prod = {}) {
+  if (typeof li.totalUnits === "number") return Number(li.totalUnits || 0);
+  // prefer explicit values, otherwise fall back to product's pack sizes
+  const bigPerBox = Number(li.bigBoxQty || prod.bigBulkQty || 0);
+  const smallPerPack = Number(li.smallPackQty || prod.smallBulkQty || 0);
+  const big = Number(li.bigBoxes || 0) * bigPerBox;
+  const small = Number(li.smallPacks || 0) * smallPerPack;
+  const loose = Number(li.looseUnits || li.quantity || 0);
+  return big + small + loose;
+}
+
+// --------------------
+// Create Sale (transaction-safe). Supports paymentType: "Cash", "Online Transfer", "Hutang".
+// If paymentType === "Hutang" the sale will be created as unpaid (paidAmount:0, remaining:total).
+// Also creates lineItems subcollection under sale and updates product stocks (transactionally).
+// --------------------
 export async function createSale(sale) {
   if (!sale || !Array.isArray(sale.items) || sale.items.length === 0) {
     throw new Error("createSale: sale.items must be a non-empty array");
   }
 
-  // new sale doc reference (auto id)
   const newSaleRef = doc(collection(db, "sales"));
 
   try {
-    await runTransaction(db, async (transaction) => {
-      // 1) READ PHASE: read all related product docs first
-      const productSnapMap = {}; // productId -> { snap, ref }
+    const saleId = await runTransaction(db, async (transaction) => {
+      // READ PHASE: read all product docs referenced
+      const productMap = {}; // productId -> { snap, ref }
       for (const li of sale.items) {
         const prodRef = doc(db, "products", li.productId);
         const snap = await transaction.get(prodRef);
         if (!snap.exists()) throw new Error("Product not found: " + li.productId);
-        productSnapMap[li.productId] = { snap, ref: prodRef };
+        productMap[li.productId] = { snap, ref: prodRef };
       }
 
-      // 2) Validate stock levels (use li.quantity which SalesForm provides)
+      // Validate stock
       for (const li of sale.items) {
-        const prodData = productSnapMap[li.productId].snap.data();
-        const currentStock = Number(prodData.startingStock ?? prodData.balance ?? 0);
-        const want = Number(li.quantity || li.totalUnits || 0);
+        const prodSnap = productMap[li.productId].snap;
+        const prodData = prodSnap.data();
+        const currentStock = Number(prodData.startingStock || prodData.balance || 0);
+        const want = computeUnitsFromLineItem(li, prodData);
         if (want > currentStock) {
           throw new Error(`Not enough stock for ${li.productName || li.name || prodData.name || li.productId}`);
         }
       }
 
-      // 3) WRITE PHASE: compute totals and write sale doc (reads are done)
-      let computedTotal;
-      if (sale.total != null) {
-        computedTotal = Number(sale.total);
+      // WRITE PHASE
+
+      // compute total (use sale.total if provided, otherwise sum line subtotals or compute)
+      const computedTotal = Number(
+        (sale.total !== undefined && sale.total !== null)
+          ? sale.total
+          : sale.items.reduce((s, i) => {
+              // subtotal if provided, otherwise compute using prices
+              if (i.subtotal !== undefined && i.subtotal !== null) return s + Number(i.subtotal || 0);
+              const prod = productMap[i.productId].snap.data();
+              const unitPrice = Number(i.discountedUnitPrice || i.unitPrice || prod.unitPrice || prod.price || 0);
+              const bigPrice = Number(i.discountedBigPrice || i.bigBoxPrice || prod.bigBulkPrice || 0);
+              const smallPrice = Number(i.discountedSmallPrice || i.smallPackPrice || prod.smallBulkPrice || 0);
+              const units = computeUnitsFromLineItem(i, prod);
+              // fallback: if the item supplies quantity only (i.quantity) assume unitPrice
+              if (i.quantity !== undefined && i.quantity !== null) {
+                return s + (Number(i.quantity) * (Number(i.price || unitPrice || 0)));
+              }
+              // otherwise use the big/small/loose breakdown
+              const bigUnits = Number(i.bigBoxes || 0) * Number(i.bigBoxQty || prod.bigBulkQty || 0);
+              const smallUnits = Number(i.smallPacks || 0) * Number(i.smallPackQty || prod.smallBulkQty || 0);
+              const looseUnits = Number(i.looseUnits || 0);
+              // compute subtotal with the appropriate prices
+              const sub = (Number(i.bigBoxes || 0) * bigPrice) +
+                          (Number(i.smallPacks || 0) * smallPrice) +
+                          (Number(i.looseUnits || 0) * unitPrice);
+              return s + Number(sub || 0);
+            }, 0)
+      );
+
+      // set initial paid / cash / online totals depending on sale.paymentType
+      const ptype = (sale.paymentType || "").toString().toLowerCase();
+      let cashTotal = 0;
+      let onlineTotal = 0;
+      let paidAmount = 0;
+      if (ptype === "cash") {
+        cashTotal = computedTotal;
+        paidAmount = computedTotal;
+      } else if (ptype === "online" || ptype === "online transfer" || ptype === "transfer") {
+        onlineTotal = computedTotal;
+        paidAmount = computedTotal;
       } else {
-        computedTotal = Number(
-          sale.items.reduce((s, i) => {
-            const unitPrice = Number(i.price ?? i.unitPrice ?? 0);
-            const qty = Number(i.quantity ?? i.totalUnits ?? 0);
-            return s + (unitPrice * qty);
-          }, 0)
-        );
+        // Hutang or unknown -> leave paidAmount 0
+        paidAmount = 0;
       }
+      const remaining = Number(computedTotal - paidAmount);
+      const status = remaining > 0 ? "Hutang" : "Paid";
 
-      // Normalize payment type: store either "Cash" or "Online Transfer"
-      const paymentRaw = String(sale.paymentType || "Cash");
-      const paymentNormalized = paymentRaw.toLowerCase().includes("cash") ? "Cash" : "Online Transfer";
-      const isOnline = paymentNormalized !== "Cash";
-      const cashTotal = isOnline ? 0 : computedTotal;
-      const onlineTotal = isOnline ? computedTotal : 0;
-
+      // write sale doc
       transaction.set(newSaleRef, {
-        ...(sale.customer ? { customer: sale.customer } : { customer: "Walk-in" }),
-        total: computedTotal,
-        paymentType: paymentNormalized,
-        cashTotal,
-        onlineTotal,
+        customer: sale.customer || "",
+        total: Number(computedTotal || 0),
+        paymentType: sale.paymentType || "Cash",
+        cashTotal: Number(cashTotal || 0),
+        onlineTotal: Number(onlineTotal || 0),
+        paidAmount: Number(paidAmount || 0),
+        remaining: Number(remaining || 0),
+        status,
         createdAt: serverTimestamp(),
       });
 
-      // update products and create line item docs under sale
+      // update each product (stock and quantitySold) and create line items under sale
       for (const li of sale.items) {
-        const { ref: prodRef, snap } = productSnapMap[li.productId];
+        const { ref: prodRef, snap } = productMap[li.productId];
         const prod = snap.data();
 
-        const soldDelta = Number(li.quantity || li.totalUnits || 0);
-        const newQuantitySold = (prod.quantitySold || 0) + soldDelta;
-        const currentStock = Number(prod.startingStock ?? prod.balance ?? 0);
-        const newStartingStock = currentStock - soldDelta;
+        const unitsSold = computeUnitsFromLineItem(li, prod);
+        const newQuantitySold = (prod.quantitySold || 0) + unitsSold;
+        const currentStock = Number(prod.startingStock || prod.balance || 0);
+        const newStartingStock = currentStock - unitsSold;
         const newBalance = newStartingStock;
 
         transaction.update(prodRef, {
@@ -195,35 +232,151 @@ export async function createSale(sale) {
         });
 
         const liRef = doc(collection(newSaleRef, "lineItems"));
-
-        const unitPrice = Number((li.price ?? li.unitPrice) || 0);
-        const qty = Number(li.quantity || li.totalUnits || 0);
-        const subtotal = Number(li.subtotal ?? (unitPrice * qty) ?? 0);
-
         transaction.set(liRef, {
           productId: li.productId,
-          productName: li.productName ?? li.name ?? prod.name ?? "",
-          unitPrice,
-          quantity: qty,
-          subtotal,
-          // keep breakdown if provided (helpful for history)
-          bigBoxes: li.bigBoxes ?? null,
-          bigBulkQty: li.bigBulkQty ?? null,
-          bigBulkPrice: li.bigBulkPrice ?? null,
-          smallPacks: li.smallPacks ?? null,
-          smallBulkQty: li.smallBulkQty ?? null,
-          smallBulkPrice: li.smallBulkPrice ?? null,
-          looseUnits: li.looseUnits ?? null,
-          loosePrice: li.loosePrice ?? null,
+          productName: li.productName || li.name || prod.name || "",
+          unitPrice: Number(li.unitPrice || prod.unitPrice || prod.price || 0),
+          bigBoxQty: Number(li.bigBoxQty || prod.bigBulkQty || 0),
+          bigBoxes: Number(li.bigBoxes || 0),
+          smallPackQty: Number(li.smallPackQty || prod.smallBulkQty || 0),
+          smallPacks: Number(li.smallPacks || 0),
+          looseUnits: Number(li.looseUnits || 0),
+          totalUnits: Number(unitsSold || 0),
+          subtotal: Number(li.subtotal || 0),
+          discountedBigPrice: li.discountedBigPrice || null,
+          discountedSmallPrice: li.discountedSmallPrice || null,
+          discountedUnitPrice: li.discountedUnitPrice || null,
           createdAt: serverTimestamp()
         });
       }
+
+      return newSaleRef.id;
     });
 
-    // return the newly created sale id
-    return newSaleRef.id;
+    return saleId;
   } catch (err) {
     console.error("createSale transaction failed:", err);
     throw err;
   }
+}
+
+// --------------------
+// Record a payment for an existing sale (partial or full).
+// --------------------
+export async function recordPayment(saleId, amount, paymentType) {
+  const saleRef = doc(db, "sales", saleId);
+  const paymentTopRef = doc(paymentsCol); // top-level payment doc
+  try {
+    const paymentId = await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(saleRef);
+      if (!snap.exists()) throw new Error("Sale not found: " + saleId);
+      const saleData = snap.data();
+      const total = Number(saleData.total || 0);
+      const prevPaid = Number(saleData.paidAmount || 0);
+      const prevCash = Number(saleData.cashTotal || 0);
+      const prevOnline = Number(saleData.onlineTotal || 0);
+
+      const amt = Number(amount || 0);
+      if (amt <= 0) throw new Error("Payment amount must be > 0");
+
+      const newPaid = prevPaid + amt;
+      const newRemaining = Math.max(0, total - newPaid);
+      const newStatus = newRemaining > 0 ? "Hutang" : "Paid";
+
+      // update sale totals according to paymentType
+      const pty = (paymentType || "Cash").toString().toLowerCase();
+      let newCash = prevCash;
+      let newOnline = prevOnline;
+      if (pty === "cash") newCash = prevCash + amt;
+      else newOnline = prevOnline + amt;
+
+      transaction.update(saleRef, {
+        paidAmount: newPaid,
+        remaining: newRemaining,
+        status: newStatus,
+        cashTotal: newCash,
+        onlineTotal: newOnline
+      });
+
+      // create payment doc under sale
+      const salePaymentRef = doc(collection(saleRef, "payments"));
+      transaction.set(salePaymentRef, {
+        amount: amt,
+        paymentType,
+        createdAt: serverTimestamp()
+      });
+
+      // create top-level payment record for querying/reporting
+      transaction.set(paymentTopRef, {
+        saleId,
+        amount: amt,
+        paymentType,
+        createdAt: serverTimestamp()
+      });
+
+      return paymentTopRef.id;
+    });
+
+    return paymentId;
+  } catch (err) {
+    console.error("recordPayment failed:", err);
+    throw err;
+  }
+}
+
+// --------------------
+// Totals for a period
+// --------------------
+export async function getTotalsForPeriod(startDate, endDate) {
+  const salesQuery = query(salesCol, where("createdAt", ">=", startDate), where("createdAt", "<", endDate));
+  const paymentsQuery = query(paymentsCol, where("createdAt", ">=", startDate), where("createdAt", "<", endDate));
+
+  const [salesSnap, paymentsSnap] = await Promise.all([getDocs(salesQuery), getDocs(paymentsQuery)]);
+
+  let cashTotal = 0;
+  let onlineTotal = 0;
+
+  salesSnap.forEach(docSnap => {
+    const d = docSnap.data();
+    cashTotal += Number(d.cashTotal || 0);
+    onlineTotal += Number(d.onlineTotal || 0);
+  });
+
+  paymentsSnap.forEach(docSnap => {
+    const d = docSnap.data();
+    const pty = (d.paymentType || "").toString().toLowerCase();
+    if (pty === "cash") cashTotal += Number(d.amount || 0);
+    else onlineTotal += Number(d.amount || 0);
+  });
+
+  return { cashTotal, onlineTotal };
+}
+
+// --------------------
+// Delete product helper
+// --------------------
+export async function deleteProduct(productId) {
+  await deleteDoc(doc(db, "products", productId));
+}
+
+// --------------------
+// Update product helper
+// --------------------
+export async function updateProduct(productId, updates) {
+  const ref = doc(db, "products", productId);
+  await updateDoc(ref, updates);
+}
+
+// ✅ Update a sale (e.g., change paymentType or customer)
+export async function updateSale(saleId, updates) {
+  const ref = doc(db, "sales", saleId);
+  await updateDoc(ref, updates);
+  return true;
+}
+
+// ✅ Update a line item (e.g., change product or quantity)
+export async function updateLineItem(saleId, lineItemId, updates) {
+  const ref = doc(db, "sales", saleId, "lineItems", lineItemId);
+  await updateDoc(ref, updates);
+  return true;
 }
